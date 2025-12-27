@@ -1,3 +1,6 @@
+# Based on v11, modified to save meet as a named tab in excel
+
+
 import requests
 from bs4 import BeautifulSoup
 import time
@@ -297,10 +300,13 @@ class SwimCloudScraper:
                 
                 print(f"      Added {len(results)} results")
         
-        # Create DataFrame and save to CSV
+        # Create DataFrame and save to Excel
         df = pd.DataFrame(all_results)
         if not df.empty:
-            df.to_csv(output_file, index=False)
+            # Truncate string for sheet name compatibility
+            trunc_meet_name = df['meet_name'].apply(lambda x: x[:31] if len(x) > 31 else x)
+            with pd.ExcelWriter(output_file) as writer:
+                df.to_excel(writer, sheet_name=trunc_meet_name.iloc[0], index=False)
             print(f"\n{'='*70}")
             print(f"✅ Scraping complete!")
             print(f"   Saved {len(df)} results to {output_file}")
@@ -325,7 +331,7 @@ if __name__ == "__main__":
     results_df = scraper.scrape_team_results(
         team_id=5245,
         max_meets=1,  # Set to None to scrape all meets
-        output_file='swimcloud_results.csv'
+        output_file='swimcloud_results.xlsx'
     )
     
     # Display sample of results
