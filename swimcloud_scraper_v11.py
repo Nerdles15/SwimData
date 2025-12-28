@@ -1,6 +1,6 @@
 # Based on v12, dynamic output filename from team name
 
-
+from selenium import webdriver
 import requests
 from bs4 import BeautifulSoup
 import time
@@ -190,6 +190,34 @@ class SwimCloudScraper:
             import traceback
             traceback.print_exc()
             return "Unknown Meet", []
+
+    def scrape_split_times(self, time_url):
+        driver = webdriver.Chrome()
+        driver.get(time_url)
+
+        html = driver.page_source
+        soup = BeautifulSoup(html, "html.parser")
+
+        table = soup.select_one("table.c-table-clean")
+
+        trs = table.find_all("tr")
+
+        for tr in trs:
+            # print(tr.get_text(" | ", strip=True)) ## Just printing the data to see if I was grabbing the corect data.
+
+            data = tr.get_text()
+
+            pattern = r'(\d+?)(\d{2}\.\d{2})(\d{2}\.\d{2})(\d+:\d{2}\.\d{2}|\d+\.\d{2})$'
+
+            match = re.match(pattern, data)
+
+            if match:
+                values = match.groups()
+                print(values)
+            else:
+                print("no match! line doesn't contain numbers, need to ignore that.")
+
+
     
     def get_event_results(self, event_url, event_name):
         """
@@ -228,11 +256,10 @@ class SwimCloudScraper:
                 
                 time_value = time_link.get_text(strip=True)
                 time_url = urljoin(self.base_url, time_link['href'])
-                
                 # Now find the corresponding athlete/team name
                 # Look for the nearest td with class="u-nowrap u-text-semi" that has a swimmer link
                 # We need to traverse up and find the row, then look for the name
-                
+                self.scrape_split_times(time_url)
                 # Find the parent table row
                 row = time_div.find_parent('tr')
                 name = "Unknown"
@@ -347,7 +374,6 @@ class SwimCloudScraper:
                         'time': result['time'],
                         'time_url': result['time_url']
                     })
-                
                 print(f"      Added {len(results)} results")
             print(f"{'─'*70}\nCompleted Meet: {meet_name}\n{'─'*70}")
 
@@ -375,7 +401,16 @@ class SwimCloudScraper:
         print(f"   Relay results: {df['is_relay'].sum()}")
         print(f"   Individual results: {(~df['is_relay']).sum()}")
         print(f"{'='*70}\n")
-        
+
+        # Crate our array that will be a data frame to go to excel
+        all_results = []
+
+        # Loop through all the links to
+        # for result in results:
+        #     print()
+        #     self.scrape_split_times(result['time_url'])
+
+
         return df
 
 
