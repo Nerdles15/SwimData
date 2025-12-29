@@ -209,37 +209,55 @@ class SwimCloudScraper:
             traceback.print_exc()
             return "Unknown Meet", []
 
-    def scrape_split_times(self, time_url, delay):
-        driver = webdriver.Chrome()
-        time.sleep(delay)  # Wait before loading page
-        driver.get(time_url)
-        time.sleep(delay)  # Wait for page to load
-        html = driver.page_source
-        soup = BeautifulSoup(html, "html.parser")
+    def scrape_split_times(self, time_url):
 
-        time.sleep(delay)  # Wait for JavaScript to load content
+        try:
+            driver = webdriver.Chrome()
+            time.sleep(self.delay)  # Wait before loading page
+            driver.get(time_url)
+            time.sleep(self.delay)  # Wait for page to load
+            html = driver.page_source
+            soup = BeautifulSoup(html, "html.parser")
 
-        table = soup.select_one("table.c-table-clean")
+            time.sleep(self.delay)  # Wait for JavaScript to load content
 
-        trs = table.find_all("tr")
+            table = soup.select_one("table.c-table-clean")
 
-        for tr in trs:
-            # print(tr.get_text(" | ", strip=True)) ## Just printing the data to see if I was grabbing the corect data.
+            trs = table.find_all("tr")
 
-            data = tr.get_text()
+            split_data = []
+            persons_name = ""
 
-            pattern = r'(\d+?)(\d{2}\.\d{2})(\d{2}\.\d{2})(\d+:\d{2}\.\d{2}|\d+\.\d{2})$'
+            for tr in trs:
+                # print(tr.get_text(" | ", strip=True)) ## Just printing the data to see if I was grabbing the corect data.
 
-            match = re.match(pattern, data)
+                data = tr.get_text()
 
-            if match:
-                values = match.groups()
-                print(values)
-            else:
-                print("no match! line doesn't contain numbers, need to ignore that.")
+                pattern = r'(\d+?)(\d{2}\.\d{2})(\d{2}\.\d{2})(\d+:\d{2}\.\d{2}|\d+\.\d{2})$'
 
+                match = re.match(pattern, data)
 
-    
+                if match:
+                    values = match.groups()
+                    split_data.append({
+                        'Distance': values[0],
+                        'split': values[1],
+                        'leg': values[2],
+                        'Cumulative': values[3],
+                        'Person': persons_name
+                    })
+                    print(values)
+                elif data != "DistanceSplitLegCumulative":
+                    persons_name = data
+                else:
+                    print("no match! line doesn't contain numbers, need to ignore that.")
+
+            return split_data
+
+        except Exception as e:
+            print(f"Error with scraping split times: {e}")
+            return []
+
     def get_event_results(self, event_url, event_name):
         """
         Get all results (names and times) for a specific event.
@@ -280,7 +298,7 @@ class SwimCloudScraper:
                 # Now find the corresponding athlete/team name
                 # Look for the nearest td with class="u-nowrap u-text-semi" that has a swimmer link
                 # We need to traverse up and find the row, then look for the name
-                self.scrape_split_times(time_url, delay=self.delay)
+                # self.scrape_split_times(time_url)
                 # Find the parent table row
                 row = time_div.find_parent('tr')
                 name = "Unknown"
@@ -317,74 +335,87 @@ class SwimCloudScraper:
             import traceback
             traceback.print_exc()
             return {'event_name': event_name, 'is_relay': False, 'results': []}
-    
-    def scrape_team_results(self, team_id, max_meets=None, output_file=None):
+
+    def scrape_team_results(self, team_id, max_meets=None, output_file=None, test_mode=False):
         """
         Scrape all results for a team and save to CSV.
-        
+
         Args:
             team_id: The team ID
             max_meets: Maximum number of meets to scrape (None for all)
             output_file: Output Excel filename (None to auto-generate from team name)
-        
+
         Returns:
             DataFrame with all results
         """
-        print(f"\n{'='*70}")
+        print(f"\n{'=' * 70}")
         print(f"Starting scrape for Team ID: {team_id}")
         print(f"Max meets: {max_meets if max_meets else 'All'}")
-        print(f"{'='*70}\n")
-        
+        print(f"{'=' * 70}\n")
+
+        iterations = 0
+        max_iterations = 10
+
         # Get team name
         self.team_name = self.get_team_name(team_id)
-        
+
         # Generate output filename from team name if not provided
         if output_file is None:
             # Clean team name for filename (remove special characters)
             clean_name = re.sub(r'[^\w\s-]', '', self.team_name)
             clean_name = re.sub(r'[-\s]+', '_', clean_name)
             output_file = f'{clean_name}.xlsx'
-        
+
         print(f"Output file: {output_file}\n")
-        
+
         df = pd.DataFrame()
-        
+
         # Get all meets for the team
         meet_urls = self.get_team_meets(team_id, max_meets)
-        
+
         if not meet_urls:
             print("\n❌ No meets found. Please check the team ID or page structure.")
             return pd.DataFrame()
-        
+
         # Create a new workbook
         with pd.ExcelWriter(output_file) as writer:
             df.to_excel(writer, index=False)
-        
+
+        print(f"Length of meet urls: {len(meet_urls)}")
+
         for meet_idx, meet_url in enumerate(meet_urls, 1):
             all_results = []
-            print(f"\n{'─'*70}")
+            all_split_times = []
+
+            print(f"\n{'─' * 70}")
             print(f"Processing Meet {meet_idx}/{len(meet_urls)}")
-            print(f"{'─'*70}")
-            
+            print(f"{'─' * 70}")
+
             # Get meet name and all events in the meet
             meet_name, event_links = self.get_meet_events(meet_url)
-            
+
             if not event_links:
                 print(f"  ⚠️  No events found in this meet, skipping...")
                 continue
-            
+
             for event_url, event_number, event_name in event_links:
+
                 # Get all results for this event directly from the event page
                 event_data = self.get_event_results(event_url, event_name)
                 is_relay = event_data['is_relay']
                 results = event_data['results']
-                
+
                 if not results:
                     print(f"    ⚠️  No results found for event {event_number}")
                     continue
-                
+
                 # Add each result to our data
                 for result in results:
+                    iterations += 1
+
+                    if test_mode and iterations > max_iterations:
+                        break
+
                     all_results.append({
                         'meet_name': meet_name,
                         'meet_url': meet_url,
@@ -395,25 +426,52 @@ class SwimCloudScraper:
                         'time': result['time'],
                         'time_url': result['time_url']
                     })
-                print(f"      Added {len(results)} results")
-            print(f"{'─'*70}\nCompleted Meet: {meet_name}\n{'─'*70}")
 
-            # Create DataFrame for this meet and append to Excel
+                    split_times = self.scrape_split_times(result['time_url'])
+
+                    # Add split time data with all the context information
+                    for split in split_times:
+                        all_split_times.append({
+                            'meet_name': meet_name,
+                            'meet_url': meet_url,
+                            'event_number': event_number,
+                            'event_name': event_name,
+                            'is_relay': is_relay,
+                            'name': result['name'],
+                            'time_url': result['time_url'],
+                            'Distance': split['Distance'],
+                            'split': split['split'],
+                            'leg': split['leg'],
+                            'Cumulative': split['Cumulative'],
+                            'Person': split['Person'],
+                        })
+
+            print(f"{'─' * 70}\nCompleted Meet: {meet_name}\n{'─' * 70}")
+
+
             df_meet = pd.DataFrame(all_results)
+            df_splits = pd.DataFrame(all_split_times)
+
             if not df_meet.empty:
                 # Truncate string for sheet name compatibility
                 trunc_meet_name = df_meet['meet_name'].apply(lambda x: x[:31] if len(x) > 31 else x)
-                # Append meet data to existing Excel file as new sheets
-                with pd.ExcelWriter(output_file, mode='a') as writer:
-                    df_meet.to_excel(writer, sheet_name=trunc_meet_name.iloc[0], index=False)
-                print(f"\n{'='*70}")
-                print(f"✅ Saved {len(df_meet)} results for meet '{trunc_meet_name.iloc[0]}' to {output_file}")
-                print(f"{'='*70}\n")
+                sheet_name = trunc_meet_name.iloc[0]
+
+                with pd.ExcelWriter(output_file, mode='a', engine='openpyxl') as writer:
+                    df_meet.to_excel(writer, sheet_name=sheet_name, index=False)
+
+                    if not df_splits.empty:
+                        split_sheet_name = f"{sheet_name[:25]}_Splits"
+                        df_splits.to_excel(writer, sheet_name=split_sheet_name, index=False)
+
+                print(f"\n{'=' * 70}")
+                print(f"✅ Saved {len(df_meet)} results for meet '{sheet_name}' to {output_file}")
+                print(f"{'=' * 70}\n")
                 df = pd.concat([df, df_meet], ignore_index=True)
             else:
                 print(f"\n❌ No results found for meet '{meet_name}'.\n")
 
-        print(f"\n{'='*70}")
+        print(f"\n{'=' * 70}")
         print(f"✅ Scraping complete!")
         print(f"   Team: {self.team_name}")
         print(f"   Saved {len(df)} results to {output_file}")
@@ -421,22 +479,15 @@ class SwimCloudScraper:
         print(f"   Unique events: {df['event_name'].nunique()}")
         print(f"   Relay results: {df['is_relay'].sum()}")
         print(f"   Individual results: {(~df['is_relay']).sum()}")
-        print(f"{'='*70}\n")
-
-        # Crate our array that will be a data frame to go to excel
-        all_results = []
-
-        # Loop through all the links to
-        # for result in results:
-        #     print()
-        #     self.scrape_split_times(result['time_url'])
-
+        print(f"{'=' * 70}\n")
 
         return df
 
 
 # Example usage
 if __name__ == "__main__":
+    test_mode = True
+
     # Initialize scraper with 1 second delay between requests
     scraper = SwimCloudScraper(delay=1.0)
     
@@ -446,7 +497,8 @@ if __name__ == "__main__":
     results_df = scraper.scrape_team_results(
         team_id=5245,
         max_meets=2,  # Set to None to scrape all meets
-        output_file=None  # Set to None to auto-generate filename from team name
+        output_file=None,  # Set to None to auto-generate filename from team name
+        test_mode=test_mode
     )
     
     # Display sample of results
