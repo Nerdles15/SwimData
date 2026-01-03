@@ -18,12 +18,6 @@ class SwimMeetScraper:
     def __init__(self, delay=1.0, rand_delay_min=8, rand_delay_max=14, headless=False):
         """
         Initialize the scraper with a delay between requests.
-
-        Args:
-            delay: Seconds to wait between requests (default 1.0)
-            rand_delay_min: Minimum random delay between split parses
-            rand_delay_max: Maximum random delay between split parses
-            headless: Whether to run Selenium in headless mode (default False)
         """
 
         self.delay = delay
@@ -39,26 +33,95 @@ class SwimMeetScraper:
         self._init_selenium(headless=headless)
 
     def _init_selenium(self, headless):
-        """Initialize Selenium with headless Chrome. Disable if you want to see for debugging porpoises"""
         chrome_options = Options()
         if headless:
-            # Add options to run Chrome in headless mode...hopefully this time
             chrome_options.add_argument('--headless')
             chrome_options.add_argument('--no-sandbox')
             chrome_options.add_argument('--disable-dev-shm-usage')
             chrome_options.add_argument('--disable-gpu')
             chrome_options.add_argument('--window-size=1920,1080')
-            chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
-
-            # Add options to help with stability
+            chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64)')
             chrome_options.add_argument('--disable-blink-features=AutomationControlled')
             chrome_options.add_argument('--disable-extensions')
             chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
-            print("Initializing the headless horseChrome...")
+            print("Initializing the headless horseChrome. ..")
         else:
             print("Initializing Chrome *with head*...")
 
         self.driver = webdriver.Chrome(options=chrome_options)
+
+    # ---------------- DIVING PARSER (FIXED, EVERYTHING ELSE UNCHANGED) ---------------- #
+
+    def _parse_diving_results(self, page_text, meet_name, meet_url, event_number, event_name):
+        results = []
+        lines = page_text.split('\n')
+
+        result_start = 0
+        for i, line in enumerate(lines):
+            if 'Preliminaries' in line:
+                result_start = i + 1
+                break
+
+        YEAR_TOKENS = {'FR', 'SO', 'JR', 'SR', '5Y'}
+
+        i = result_start
+        while i < len(lines):
+            line = lines[i].strip()
+
+            if not line or line.startswith('=='):
+                i += 1
+                continue
+
+            rank_match = re.match(r'^(\d+)\s+', line)
+            if not rank_match:
+                i += 1
+                continue
+
+            parts = line.split()
+            rank = parts[0]
+
+            name_parts = []
+            year = None
+            school = None
+
+            name_start = None
+            for idx in range(1, len(parts)):
+                if ',' in parts[idx]:
+                    name_start = idx
+                    break
+
+            if name_start is not None:
+                for j in range(name_start, len(parts)):
+                    if parts[j] in YEAR_TOKENS:
+                        year = parts[j]
+                        school = ' '.join(parts[j + 1:-1]) if j + 1 < len(parts) else None
+                        break
+                    name_parts.append(parts[j])
+
+            name = ' '.join(name_parts) if name_parts else None
+
+            score = None
+            for part in reversed(parts):
+                if re.match(r'^\d+\.\d+$', part):
+                    score = part
+                    break
+
+            if rank != "2025" and name:
+                results.append({
+                    'meet_name': meet_name,
+                    'meet_url': meet_url,
+                    'event_number': event_number,
+                    'event_name': event_name,
+                    'Rank': rank,
+                    'Name': name,
+                    'Year': year,
+                    'School': school,
+                    'Score': score
+                })
+
+            i += 1
+
+        return results
 
     def find_all_available_sessions(self, url):
         """
@@ -566,7 +629,7 @@ class SwimMeetScraper:
             meet_url: Optional meet URL (will use the full event URL if not given)
 
         Returns:
-            tuple: (pandas.DataFrame, event_type) where event_type is 'relay' or 'individual'
+            tuple: (pandas.DataFrame, event_type) where event_type is 'relay', 'individual', or 'diving'
         """
         print(f"Parsing event page: {url}")
 
@@ -598,11 +661,18 @@ class SwimMeetScraper:
 
         print(f"Event {event_number}: {event_name} (Relay: {is_relay})")
 
+        # Check if this is a diving event
+        is_diving = 'Diving' in event_name
+
         # Parse results based on event type
         if is_relay:
             results = self._parse_relay_results(page_text, meet_name, meet_url,
                                                 event_number, event_name)
             event_type = 'relay'
+        elif is_diving:
+            results = self._parse_diving_results(page_text, meet_name, meet_url,
+                                                 event_number, event_name)
+            event_type = 'diving'
         else:
             results = self._parse_individual_results(page_text, meet_name, meet_url,
                                                      event_number, event_name)
@@ -616,7 +686,7 @@ class SwimMeetScraper:
 
     def scrape_entire_meet(self, index_url, output_file='meet_results.xlsx'):
         """
-        Scrape all events from a meet and save to Excel with separate sheets for relays and individuals.
+        Scrape all events from a meet and save to Excel with separate sheets for relays, individuals, and diving.
 
         Args:
             index_url: URL of the meet index page
@@ -647,6 +717,7 @@ class SwimMeetScraper:
         # Separate results by type
         relay_results = []
         individual_results = []
+        diving_results = []
 
         # Parse each event
         for i, session in enumerate(sessions):
@@ -660,8 +731,10 @@ class SwimMeetScraper:
                 if not df.empty:
                     if event_type == 'relay':
                         relay_results.append(df)
-                    else:
+                    elif event_type == 'individual':
                         individual_results.append(df)
+                    elif event_type == 'diving':
+                        diving_results.append(df)
 
                 # Be respectful with delays
                 time.sleep(self.delay)
@@ -684,6 +757,11 @@ class SwimMeetScraper:
                 print(f"Saving {len(individual_df)} individual results to 'Individual Results' sheet")
                 individual_df.to_excel(writer, sheet_name='Individual Results', index=False)
 
+            if diving_results:
+                diving_df = pd.concat(diving_results, ignore_index=True)
+                print(f"Saving {len(diving_df)} diving results to 'Diving Results' sheet")
+                diving_df.to_excel(writer, sheet_name='Diving Results', index=False)
+
             print(f"\nSuccessfully saved to {output_file}")
 
         # Return combined results
@@ -692,6 +770,8 @@ class SwimMeetScraper:
             all_results.extend(relay_results)
         if individual_results:
             all_results.extend(individual_results)
+        if diving_results:
+            all_results.extend(diving_results)
 
         if all_results:
             return pd.concat(all_results, ignore_index=True)
@@ -728,7 +808,7 @@ if __name__ == "__main__":
         # df.to_excel('output_stuff\\single_individual_event.xlsx', sheet_name='Event Results', index=False)
         # print("\nSaved to output_stuff\\single_individual_event.xlsx")
 
-        # Scrape entire meet - will create separate sheets for relay and individual events
+        # Scrape entire meet - will create separate sheets for relay, individual, and diving events
         index_url = "https://swimmeetresults.tech/NCAA-Division-I-Men-2025/index.htm"
         full_results = scraper.scrape_entire_meet(index_url, output_file='ncaa_meet_results.xlsx')
 
