@@ -1,14 +1,4 @@
-# Based on v12 This version is 1.0.0.1 (john increment this if you make changes :)) (Oh I will -john)
-
-#===================#
-# This version is:  #
-#                   #
-#  0.1.1.0.1.0.0.0  #
-#  0.1.1.0.0.1.0.1  #
-#  0.1.1.0.1.1.0.0  #
-#  0.1.1.1.0.0.0.0  #
-#                   #
-#===================# -EDI
+# Based on v12 This version is 1.0.0.2 (added individual event parsing)
 
 # Import everything needed
 from selenium import webdriver
@@ -59,7 +49,7 @@ class SwimMeetScraper:
             chrome_options.add_argument('--disable-gpu')
             chrome_options.add_argument('--window-size=1920,1080')
             chrome_options.add_argument('user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
-            
+
             # Add options to help with stability
             chrome_options.add_argument('--disable-blink-features=AutomationControlled')
             chrome_options.add_argument('--disable-extensions')
@@ -201,6 +191,11 @@ class SwimMeetScraper:
         i = result_start
         while i < len(lines):
             line = lines[i].strip()
+
+            # Stop if we've reached the team rankings or end
+            if 'Team Rankings' in line or line.startswith('Men -') or line.startswith('Women -'):
+                print(f"DEBUG: Reached end section at line {i}")
+                break
 
             # Check if this is a result line (starts with rank number)
             rank_match = re.match(r'^\s*(\d+)\s+', line)
@@ -354,8 +349,8 @@ class SwimMeetScraper:
 
     def _parse_individual_results(self, page_text, meet_name, meet_url, event_number, event_name):
         """
-        Parse individual event results from page text.
-        Returns: list of dictionaries with result data
+        Parse individual event results from page text with all splits.
+        Returns: list of dictionaries with detailed split data (up to 33 splits)
         """
         results = []
 
@@ -363,7 +358,6 @@ class SwimMeetScraper:
         lines = page_text.split('\n')
 
         # Find the start of results
-        # The number of ==='s changes by event, and happens twice- changed logic to find any === and take second one
         result_start = 0
         second_separator_found = 0
         for i, line in enumerate(lines):
@@ -373,55 +367,195 @@ class SwimMeetScraper:
                     break
                 second_separator_found += 1
 
+        print(f"DEBUG: Starting individual results parse at line {result_start} of {len(lines)}")
+
         # Parse each result
         i = result_start
+        results_count = 0
         while i < len(lines):
             line = lines[i].strip()
 
             # Check if this is a result line (starts with rank number)
             rank_match = re.match(r'^\s*(\d+)\s+', line)
             if rank_match:
+                rank = rank_match.group(1)
+                results_count += 1
+                if results_count % 10 == 0:
+                    print(f"DEBUG: Processed {results_count} swimmers...")
+
                 parts = line.split()
 
-                if len(parts) >= 3:
-                    # Extract swimmer name
-                    swimmer_name = None
-                    for j in range(1, len(parts)):
-                        if ',' in parts[j]:
-                            # Name format is usually "Last, First"
-                            swimmer_name = parts[j]
-                            # Check if next part is part of name
-                            if j + 1 < len(parts) and (not parts[j + 1][0].isupper() or len(parts[j + 1]) <= 3):
+                # Extract swimmer name and year/school
+                swimmer_name = None
+                year = None
+                school = None
+
+                # Find name (contains comma)
+                for j in range(1, len(parts)):
+                    if ',' in parts[j]:
+                        swimmer_name = parts[j]
+                        # Check if next parts are part of name or year/school
+                        if j + 1 < len(parts):
+                            # Year is typically 2-3 characters (JR, SR, SO, FR, 5Y)
+                            if len(parts[j + 1]) <= 3 and parts[j + 1].isupper():
+                                year = parts[j + 1]
+                                if j + 2 < len(parts):
+                                    school = parts[j + 2]
+                            else:
+                                # Part of name
                                 swimmer_name += ' ' + parts[j + 1]
+                                if j + 2 < len(parts) and len(parts[j + 2]) <= 3:
+                                    year = parts[j + 2]
+                                    if j + 3 < len(parts):
+                                        school = parts[j + 3]
+                        break
+
+                # Find the finals time (last time in the line)
+                time_pattern = r'\d+:\d+\.\d+|\d+\.\d+'
+                finals_time = None
+                for part in reversed(parts):
+                    if re.match(time_pattern, part):
+                        finals_time = re.sub(r'[A-Z]', '', part)
+                        break
+
+                # Now collect all split lines for this swimmer
+                i += 1
+                splits_lines = []
+                splits_line_count = 0
+                max_splits_lines = 20  # Safety limit to prevent infinite loops
+
+                # Continue reading lines until we hit another result or separator
+                while i < len(lines) and splits_line_count < max_splits_lines:
+                    next_line = lines[i].strip()
+
+                    # Stop if we hit another result line or empty line or section divider
+                    if re.match(r'^\s*(\d+)\s+', next_line) or next_line.startswith(
+                            '--') or next_line == '' or next_line.startswith('===') or 'Team Rankings' in next_line:
+                        break
+
+                    # Check if this line contains splits (has time patterns)
+                    if re.search(r'\d+:\d+\.\d+|\d+\.\d+', next_line):
+                        splits_lines.append(next_line)
+                        splits_line_count += 1
+                        i += 1
+                    else:
+                        i += 1
+                        break
+
+                # Parse all splits from the collected lines
+                splits_data = {}
+                if splits_lines:
+                    all_splits_text = ' '.join(splits_lines)
+
+                    # Extract all times for processing
+                    time_pattern = r'(\d+:\d+\.\d+|\d+\.\d+)'
+                    all_times = re.findall(time_pattern, all_splits_text)
+
+                    # Parse splits - the pattern is:
+                    # r:+0.66 split_time cumulative_time (diff)
+                    # OR
+                    # r:+0.66 split_time_only (with no parentheses after, meaning no cumulative)
+                    #         cumulative_time (diff)
+
+                    # Strategy: Check if each time has parentheses immediately after it
+                    # - If YES with format "time (something)" → time is cumulative
+                    # - If NO → time is just a split time, no cumulative yet
+
+                    split_num = 1
+                    times_idx = 0
+
+                    # Skip reaction time if present
+                    if times_idx < len(all_times) and float(all_times[times_idx]) < 1.0:
+                        times_idx += 1
+
+                    # Parse times by checking if they have parentheses after them
+                    while times_idx < len(all_times) and split_num <= 33:
+                        if times_idx >= len(all_times):
                             break
 
-                    # Find the finals time
-                    time_pattern = r'\d+:\d+\.\d+|\d+\.\d+'
-                    finals_time = None
+                        current_time = all_times[times_idx]
 
-                    for part in reversed(parts):
-                        if re.match(time_pattern, part):
-                            finals_time = re.sub(r'[A-Z]', '', part)
-                            break
+                        # Determine distance based on split number
+                        # For 1650, typically 50 yard splits
+                        distance = split_num * 50
 
-                    if swimmer_name and finals_time:
-                        results.append({
-                            'meet_name': meet_name,
-                            'meet_url': meet_url,
-                            'event_number': event_number,
-                            'event_name': event_name,
-                            'is_relay': False,
-                            'Team Name': None,
-                            'Name': swimmer_name,
-                            'Order': None,
-                            'Split': None,
-                            'Leg': None,
-                            'Cumulative': finals_time
-                        })
+                        # Check if current_time has parentheses after it in the original text
+                        # Pattern: current_time (something)
+                        has_parentheses_after = re.search(
+                            re.escape(current_time) + r'\s*\(',
+                            all_splits_text
+                        )
 
-            i += 1
+                        if has_parentheses_after:
+                            # This time has parentheses, so it's a cumulative time
+                            # We need to find what the split time was
+                            # The split time is the value in the parentheses
+                            # But we already have it as the "next" time in our list
 
+                            # Actually, let's reconsider:
+                            # Format is: cumulative_time (split_diff)
+                            # So current_time is the cumulative
+                            # We need to calculate or get the split from parentheses
+
+                            # Extract the diff from parentheses
+                            paren_match = re.search(
+                                re.escape(current_time) + r'\s*\(([\d:.]+)\)',
+                                all_splits_text
+                            )
+
+                            if paren_match:
+                                split_diff = paren_match.group(1)
+
+                                splits_data[f'split_{split_num}_distance'] = distance
+                                splits_data[f'split_{split_num}_time'] = split_diff
+                                splits_data[f'split_{split_num}_cumulative'] = current_time
+
+                                # Skip the diff time in our times array since we already used it
+                                times_idx += 1
+                                if times_idx < len(all_times) and all_times[times_idx] == split_diff:
+                                    times_idx += 1
+
+                                split_num += 1
+                            else:
+                                # Couldn't find parentheses pattern, skip this time and move on
+                                times_idx += 1
+                        else:
+                            # This time has NO parentheses after it
+                            # So it's just a split time with no cumulative
+                            splits_data[f'split_{split_num}_distance'] = distance
+                            splits_data[f'split_{split_num}_time'] = current_time
+                            splits_data[f'split_{split_num}_cumulative'] = None
+
+                            times_idx += 1
+                            split_num += 1
+
+                if swimmer_name:
+                    result = {
+                        'meet_name': meet_name,
+                        'meet_url': meet_url,
+                        'event_number': event_number,
+                        'event_name': event_name,
+                        'is_relay': False,
+                        'Rank': rank,
+                        'Name': swimmer_name,
+                        'Year': year,
+                        'School': school,
+                        'Finals_Time': finals_time
+                    }
+
+                    # Add all split columns (up to 33)
+                    for split_idx in range(1, 34):
+                        result[f'split_{split_idx}_distance'] = splits_data.get(f'split_{split_idx}_distance', None)
+                        result[f'split_{split_idx}_time'] = splits_data.get(f'split_{split_idx}_time', None)
+                        result[f'split_{split_idx}_cumulative'] = splits_data.get(f'split_{split_idx}_cumulative', None)
+
+                    results.append(result)
+            else:
+                i += 1
+
+        print(f"DEBUG: Completed parsing. Found {len(results)} total results")
         return results
+
     def parse_event_page(self, url, meet_name=None, meet_url=None):
         """
         Parse an event results page and extract all relevant data.
@@ -429,11 +563,10 @@ class SwimMeetScraper:
         Args:
             url: URL of the event page to parse
             meet_name: Optional meet name (will be extracted if not provided)
-            meet_url: Optional meet URL (will use provided URL if not given)
+            meet_url: Optional meet URL (will use the full event URL if not given)
 
         Returns:
-            pandas.DataFrame: DataFrame with columns [meet_name, meet_url, event_number,
-                             event_name, is_relay, Name, Distance, Split, Leg, Cumulative]
+            tuple: (pandas.DataFrame, event_type) where event_type is 'relay' or 'individual'
         """
         print(f"Parsing event page: {url}")
 
@@ -452,17 +585,16 @@ class SwimMeetScraper:
         if not meet_name:
             meet_name = self._extract_meet_name(page_text)
 
-        # Use the URL as meet_url if not provided
+        # Use the full event URL as meet_url if not provided
         if not meet_url:
-            # Get the base URL (everything before the .htm file)
-            meet_url = url.rsplit('/', 1)[0] + '/'
+            meet_url = url
 
         # Extract event information
         event_number, event_name, is_relay = self._extract_event_info(page_text)
 
         if not event_number or not event_name:
             print(f"Could not extract event information from {url}")
-            return pd.DataFrame()
+            return pd.DataFrame(), None
 
         print(f"Event {event_number}: {event_name} (Relay: {is_relay})")
 
@@ -470,19 +602,21 @@ class SwimMeetScraper:
         if is_relay:
             results = self._parse_relay_results(page_text, meet_name, meet_url,
                                                 event_number, event_name)
+            event_type = 'relay'
         else:
             results = self._parse_individual_results(page_text, meet_name, meet_url,
                                                      event_number, event_name)
+            event_type = 'individual'
 
         print(f"Extracted {len(results)} results")
 
         # Convert to DataFrame
         df = pd.DataFrame(results)
-        return df
+        return df, event_type
 
     def scrape_entire_meet(self, index_url, output_file='meet_results.xlsx'):
         """
-        Scrape all events from a meet and save to Excel.
+        Scrape all events from a meet and save to Excel with separate sheets for relays and individuals.
 
         Args:
             index_url: URL of the meet index page
@@ -510,20 +644,24 @@ class SwimMeetScraper:
 
         print(f"Meet name: {meet_name}")
 
-        # Create or overwrite the Excel file
-        all_results = []
+        # Separate results by type
+        relay_results = []
+        individual_results = []
 
         # Parse each event
         for i, session in enumerate(sessions):
             print(f"\nProcessing event {i + 1}/{len(sessions)}: {session['event_name']}")
 
             try:
-                df = self.parse_event_page(session['full_url'],
-                                           meet_name=meet_name,
-                                           meet_url=index_url)
+                df, event_type = self.parse_event_page(session['full_url'],
+                                                       meet_name=meet_name,
+                                                       meet_url=session['full_url'])
 
                 if not df.empty:
-                    all_results.append(df)
+                    if event_type == 'relay':
+                        relay_results.append(df)
+                    else:
+                        individual_results.append(df)
 
                 # Be respectful with delays
                 time.sleep(self.delay)
@@ -534,16 +672,29 @@ class SwimMeetScraper:
                 traceback.print_exc()
                 continue
 
-        # Combine all results
+        # Save to Excel with multiple sheets
+        with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+            if relay_results:
+                relay_df = pd.concat(relay_results, ignore_index=True)
+                print(f"\nSaving {len(relay_df)} relay results to 'Relay Results' sheet")
+                relay_df.to_excel(writer, sheet_name='Relay Results', index=False)
+
+            if individual_results:
+                individual_df = pd.concat(individual_results, ignore_index=True)
+                print(f"Saving {len(individual_df)} individual results to 'Individual Results' sheet")
+                individual_df.to_excel(writer, sheet_name='Individual Results', index=False)
+
+            print(f"\nSuccessfully saved to {output_file}")
+
+        # Return combined results
+        all_results = []
+        if relay_results:
+            all_results.extend(relay_results)
+        if individual_results:
+            all_results.extend(individual_results)
+
         if all_results:
-            final_df = pd.concat(all_results, ignore_index=True)
-
-            # Save to Excel
-            print(f"\nSaving {len(final_df)} total results to {output_file}")
-            final_df.to_excel(output_file, sheet_name='All Results', index=False)
-            print(f"Successfully saved to {output_file}")
-
-            return final_df
+            return pd.concat(all_results, ignore_index=True)
         else:
             print("No results found!")
             return pd.DataFrame()
@@ -556,27 +707,28 @@ class SwimMeetScraper:
 
 if __name__ == "__main__":
     # Initialize scraper
-    scraper = SwimMeetScraper(delay=1.0, # General delay b/w requests
-                               rand_delay_min=8, # Min random delay b/w split parses
-                               rand_delay_max=14, # Max random delay b/w split parses
-                               headless=False # Set to False to see browser window
-                               )
+    scraper = SwimMeetScraper(delay=1.0,  # General delay b/w requests
+                              rand_delay_min=8,  # Min random delay b/w split parses
+                              rand_delay_max=14,  # Max random delay b/w split parses
+                              headless=False  # Set to False to see browser window
+                              )
 
     try:
-        # # Example: Parse a single event
-        # event_url = "https://swimmeetresults.tech/NCAA-Division-I-Men-2025/250326P004.htm"
-        # df = scraper.parse_event_page(event_url,
+        # Example: Parse a single individual event
+        # event_url = "https://swimmeetresults.tech/NCAA-Division-I-Men-2025/250326F015.htm"
+        # df, event_type = scraper.parse_event_page(event_url,
         #                               meet_name="2025 NCAA Division I Men's Swimming & Diving",
         #                               meet_url="https://swimmeetresults.tech/NCAA-Division-I-Men-2025/")
 
+        # print(f"\nEvent Type: {event_type}")
         # print("\nResults preview:")
-        # print(df.to_string())
+        # print(df.head().to_string())
 
         # # Save single event
-        # df.to_excel('output_stuff\\single_event_results.xlsx', sheet_name='Event Results', index=False)
-        # print("\nSaved to output_stuff\\single_event_results.xlsx")
+        # df.to_excel('output_stuff\\single_individual_event.xlsx', sheet_name='Event Results', index=False)
+        # print("\nSaved to output_stuff\\single_individual_event.xlsx")
 
-        # This should find all the meets that we can scrape. We will have to loop through it to scrape everything.
+        # Scrape entire meet - will create separate sheets for relay and individual events
         index_url = "https://swimmeetresults.tech/NCAA-Division-I-Men-2025/index.htm"
         full_results = scraper.scrape_entire_meet(index_url, output_file='ncaa_meet_results.xlsx')
 
